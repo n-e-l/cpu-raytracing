@@ -3,13 +3,53 @@ use std::io::BufWriter;
 use std::path::Path;
 use glam::Vec3;
 
+trait SdfObject {
+    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)>;
+    fn color(&self, pos: Vec3) -> Vec3;
+}
+
+struct Floor {
+    y: f32
+}
+
+impl SdfObject for Floor {
+    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
+        if pos.y <= self.y {
+            Some((self.y - pos.y, self))
+        } else {
+            None
+        }
+    }
+
+    fn color(&self, pos: Vec3) -> Vec3 {
+        Vec3::new(0.5, 0.5, 0.5)
+    }
+}
+
 struct Sphere {
     radius: f32,
-    pos: Vec3
+    pos: Vec3,
+    color: Vec3
+}
+
+impl SdfObject for Sphere {
+    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
+        let d = (pos - self.pos).length() - self.radius;
+        if d <= 0.0 {
+            Some((d, self))
+        } else {
+            None
+        }
+    }
+
+    fn color(&self, pos: Vec3) -> Vec3 {
+        self.color
+    }
 }
 
 struct World {
-   spheres: Vec<Sphere>
+   spheres: Vec<Sphere>,
+    floor: Option<Floor>
 }
 
 struct Ray {
@@ -17,15 +57,24 @@ struct Ray {
     dir: Vec3
 }
 
+impl Ray {
+    pub fn at(&self, t: f32) -> Vec3 {
+        self.origin + self.dir * t
+    }
+}
+
 impl World {
     fn new() -> Self {
         Self {
-            spheres: vec![Sphere { radius: 0.1, pos: Vec3::new(0.0, 0.0, 0.0) }]
+            spheres: vec![],
+            floor: Some(Floor {
+                y: -0.2
+            }),
         }
     }
 
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &Sphere)> {
-        let mut result = None;
+    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
+        let mut result: Option<(f32, &dyn SdfObject)> = None;
         let mut min = f32::MAX;
         for sphere in &self.spheres {
             let d = (sphere.pos - pos).length() - sphere.radius;
@@ -34,10 +83,19 @@ impl World {
                 result = Some((d, sphere));
             }
         }
+
+        if let Some(floor) = &self.floor {
+            let d = pos.y - floor.y;
+            if d <= min {
+                min = d;
+                result = Some((d, floor));
+            }
+        }
+
         result
     }
 
-    fn hit(&self, ray: Ray) -> Option<(f32, &Sphere)> {
+    fn hit(&self, ray: &Ray) -> Option<(f32, &dyn SdfObject)> {
 
         if self.sdf(ray.origin).is_none() {
             return None;
@@ -116,6 +174,7 @@ fn main() {
 
     let mut world = World::new();
 
+
     for i in 0..10 {
         world.spheres.push(Sphere {
             radius: 0.3,
@@ -123,7 +182,8 @@ fn main() {
                 rand::random::<f32>() * 2.0 - 1.0,
                 rand::random::<f32>() * 2.0 - 1.0,
                 rand::random::<f32>() * 2.0 - 1.0,
-            )
+            ),
+            color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>())
         });
     }
 
@@ -134,11 +194,11 @@ fn main() {
             let spread = 2.5;
             let ray = Ray {
                 origin: Vec3::new(0.0, 0.0, -2.0),
-                dir: Vec3::new(rx * 2.0 - 1.0, ry * 2.0 - 1.0, spread).normalize()
+                dir: Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize()
             };
 
-            let color = if let Some((dist, _)) = world.hit(ray) {
-                1.0 - (Vec3::new(dist, dist, dist) * 0.3)
+            let color = if let Some((dist, object )) = world.hit(&ray) {
+                1.0 - (Vec3::new(dist, dist, dist) * 0.3) * object.color(ray.at(dist))
             } else {
                 Vec3::new(0f32, 0f32, 0f32)
             };
