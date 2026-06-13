@@ -3,13 +3,20 @@ use std::io::BufWriter;
 use std::path::Path;
 use glam::Vec3;
 
+struct Material {
+    color: Vec3,
+    reflective: bool
+}
+
 trait SdfObject {
     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)>;
-    fn color(&self, pos: Vec3) -> Vec3;
+    fn normal(&self, pos: Vec3) -> Vec3;
+    fn material(&self) -> &Material;
 }
 
 struct Floor {
-    y: f32
+    y: f32,
+    material: Material
 }
 
 impl SdfObject for Floor {
@@ -21,15 +28,19 @@ impl SdfObject for Floor {
         }
     }
 
-    fn color(&self, pos: Vec3) -> Vec3 {
-        Vec3::new(0.5, 0.5, 0.5)
+    fn normal(&self, pos: Vec3) -> Vec3 {
+        Vec3::new(0.0, 1.0, 0.0)
+    }
+
+    fn material(&self) -> &Material {
+        &self.material
     }
 }
 
 struct Sphere {
     radius: f32,
     pos: Vec3,
-    color: Vec3
+    material: Material
 }
 
 impl SdfObject for Sphere {
@@ -42,8 +53,12 @@ impl SdfObject for Sphere {
         }
     }
 
-    fn color(&self, pos: Vec3) -> Vec3 {
-        self.color
+    fn normal(&self, hit: Vec3) -> Vec3 {
+        (hit - self.pos).normalize()
+    }
+
+    fn material(&self) -> &Material {
+        &self.material
     }
 }
 
@@ -68,7 +83,11 @@ impl World {
         Self {
             spheres: vec![],
             floor: Some(Floor {
-                y: -0.2
+                y: -0.2,
+                material: Material {
+                    color: Vec3::new(0.5, 0.5, 0.5),
+                    reflective: true
+                }
             }),
         }
     }
@@ -95,18 +114,19 @@ impl World {
         result
     }
 
-    fn hit(&self, ray: &Ray) -> Option<(f32, &dyn SdfObject)> {
+    fn hit(&self, ray: Ray) -> Option<(f32, Vec3, &dyn SdfObject)> {
 
         if self.sdf(ray.origin).is_none() {
             return None;
         }
 
         let mut dist = 0.0;
-        for i in 0..100 {
+        for i in 0..300 {
             let (t, sphere) = self.sdf(ray.origin + ray.dir * dist).unwrap();
+
             dist += t;
             if t < 0.0001 {
-                return Some((dist, sphere));
+                return Some((dist, ray.origin + ray.dir * dist, sphere));
             }
 
             if t > 1000.0 {
@@ -170,7 +190,7 @@ fn write_image(sink: Sink, path: &Path) {
 }
 
 fn main() {
-    let mut sink = Sink::new(256, 256);
+    let mut sink = Sink::new(512, 512);
 
     let mut world = World::new();
 
@@ -183,9 +203,14 @@ fn main() {
                 rand::random::<f32>() * 2.0 - 1.0,
                 rand::random::<f32>() * 2.0 - 1.0,
             ),
-            color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>())
+            material: Material {
+                color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>()),
+                reflective: rand::random::<f32>() > 0.5
+            }
         });
     }
+
+    let light = Vec3::new(1.0, -3.4, 4.5).normalize();
 
     for x in 0..sink.width {
         for y in 0..sink.height {
@@ -197,13 +222,25 @@ fn main() {
                 dir: Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize()
             };
 
-            let color = if let Some((dist, object )) = world.hit(&ray) {
-                1.0 - (Vec3::new(dist, dist, dist) * 0.3) * object.color(ray.at(dist))
-            } else {
-                Vec3::new(0f32, 0f32, 0f32)
-            };
+            if let Some((dist, hit, object )) = world.hit(ray) {
+                // let mut color = 1.0 - (Vec3::new(dist, dist, dist) * 0.3) * object.material().color;
+                let mut color = object.material().color;
 
-            sink.set_pixel(x, y, color);
+                let shadowed = world.hit(Ray {
+                    origin: hit - light * 0.001,
+                    dir: -light
+                }).is_some();
+
+                if shadowed {
+                    color *= 0.5;
+                }
+
+                // object.normal(ray.at(dist)) * 0.5 + 0.5
+                sink.set_pixel(x, y, color);
+            } else {
+                let color = Vec3::new(0f32, 0f32, 0f32);
+                sink.set_pixel(x, y, color);
+            };
         }
     }
 
