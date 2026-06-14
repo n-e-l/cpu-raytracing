@@ -63,10 +63,11 @@ impl SdfObject for Sphere {
 }
 
 struct World {
-   spheres: Vec<Sphere>,
+    spheres: Vec<Sphere>,
     floor: Option<Floor>
 }
 
+#[derive(Clone, Copy)]
 struct Ray {
     origin: Vec3,
     dir: Vec3
@@ -78,6 +79,13 @@ impl Ray {
     }
 }
 
+struct Hit<'a> {
+    distance: f32,
+    point: Vec3,
+    object: &'a dyn SdfObject,
+    normal: Vec3
+}
+
 impl World {
     fn new() -> Self {
         Self {
@@ -86,7 +94,7 @@ impl World {
                 y: -0.2,
                 material: Material {
                     color: Vec3::new(0.5, 0.5, 0.5),
-                    reflective: true
+                    reflective: false
                 }
             }),
         }
@@ -114,7 +122,7 @@ impl World {
         result
     }
 
-    fn hit(&self, ray: Ray) -> Option<(f32, Vec3, &dyn SdfObject)> {
+    fn hit(&self, ray: Ray) -> Option<Hit> {
 
         if self.sdf(ray.origin).is_none() {
             return None;
@@ -122,11 +130,17 @@ impl World {
 
         let mut dist = 0.0;
         for i in 0..300 {
-            let (t, sphere) = self.sdf(ray.origin + ray.dir * dist).unwrap();
+            let (t, object) = self.sdf(ray.origin + ray.dir * dist).unwrap();
 
             dist += t;
             if t < 0.0001 {
-                return Some((dist, ray.origin + ray.dir * dist, sphere));
+                let point = ray.origin + ray.dir * dist;
+                return Some(Hit {
+                    distance: dist,
+                    point,
+                    object: object,
+                    normal: object.normal(point)
+                });
             }
 
             if t > 1000.0 {
@@ -194,15 +208,14 @@ fn main() {
 
     let mut world = World::new();
 
-
-    for i in 0..10 {
+    for i in 0..15 {
         world.spheres.push(Sphere {
-            radius: 0.3,
+            radius: rand::random::<f32>() * 0.3,
             pos: Vec3::new(
                 rand::random::<f32>() * 2.0 - 1.0,
+                rand::random::<f32>() * 1.0,
                 rand::random::<f32>() * 2.0 - 1.0,
-                rand::random::<f32>() * 2.0 - 1.0,
-            ),
+            ) * 0.7,
             material: Material {
                 color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>()),
                 reflective: rand::random::<f32>() > 0.5
@@ -217,17 +230,38 @@ fn main() {
             let rx = x as f32 / sink.width as f32;
             let ry = y as f32 / sink.height as f32;
             let spread = 2.5;
-            let ray = Ray {
+            let ray_dir = Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize();
+            let mut ray = Ray {
                 origin: Vec3::new(0.0, 0.0, -2.0),
-                dir: Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize()
+                dir: ray_dir
             };
 
-            if let Some((dist, hit, object )) = world.hit(ray) {
-                // let mut color = 1.0 - (Vec3::new(dist, dist, dist) * 0.3) * object.material().color;
-                let mut color = object.material().color;
+            let mut final_hit = None;
+            while let Some(hit) = world.hit(ray) {
+                // Exit on first non reflective object
+                if !hit.object.material().reflective {
+                    final_hit = Some(hit);
+                    break;
+                }
+
+                // Calculate the reflection
+                let reflect = ray.dir - hit.normal * 2.0 * hit.normal.dot(ray.dir);
+                ray = Ray {
+                    origin: hit.point + reflect * 0.001,
+                    dir: reflect
+                };
+            }
+
+            if let Some(mut hit) = final_hit {
+
+                let mut color = hit.object.material().color;
+                // let mut color = 1.0 - (Vec3::new(hit.distance, hit.distance, hit.distance) * 0.3) * hit.object.material().color;
+
+                let dot = hit.normal.dot(-light);
+                color *= dot;
 
                 let shadowed = world.hit(Ray {
-                    origin: hit - light * 0.001,
+                    origin: hit.point - light * 0.001,
                     dir: -light
                 }).is_some();
 
