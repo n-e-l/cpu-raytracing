@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use glam::Vec3;
+use parry3d::query::PointQuery;
+use rayon::prelude::*;
 
 struct Material {
     color: Vec3,
@@ -62,8 +64,67 @@ impl SdfObject for Sphere {
     }
 }
 
+struct Triangle {
+    g_triangle: parry3d::shape::Triangle,
+    material: Material
+}
+
+impl Triangle {
+    fn new(a: Vec3, b: Vec3, c: Vec3) -> Self {
+        Self {
+            g_triangle: parry3d::shape::Triangle::new(
+                a, b, c
+            ),
+            material: Material {
+                color: Vec3::new(1.0, 0.0, 0.0),
+                reflective: false
+            }
+        }
+    }
+}
+
+impl SdfObject for Triangle {
+    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
+        Some((self.g_triangle.distance_to_local_point(pos, true), self))
+    }
+
+    fn normal(&self, pos: Vec3) -> Vec3 {
+        self.g_triangle.normal().unwrap()
+    }
+
+    fn material(&self) -> &Material {
+        &self.material
+    }
+}
+
+// struct Docecahedron {
+//     scale: f32
+// }
+//
+// impl Docecahedron {
+//     fn new() -> Self {
+//
+//     }
+// }
+//
+// impl SdfObject for Docecahedron {
+//     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
+//         let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
+//         todo!()
+//     }
+//
+//     fn normal(&self, pos: Vec3) -> Vec3 {
+//         todo!()
+//     }
+//
+//     fn material(&self) -> &Material {
+//         todo!()
+//     }
+// }
+
 struct World {
     spheres: Vec<Sphere>,
+    triangles: Vec<Triangle>,
     floor: Option<Floor>
 }
 
@@ -90,6 +151,7 @@ impl World {
     fn new() -> Self {
         Self {
             spheres: vec![],
+            triangles: vec![],
             floor: Some(Floor {
                 y: -0.2,
                 material: Material {
@@ -108,6 +170,15 @@ impl World {
             if d <= min {
                 min = d;
                 result = Some((d, sphere));
+            }
+        }
+
+        for triangle in &self.triangles {
+            if let Some((d, t)) = triangle.sdf(pos) {
+                if d <= min {
+                    min = d;
+                    result = Some((d, t));
+                }
             }
         }
 
@@ -222,6 +293,12 @@ fn main() {
             }
         });
     }
+
+    world.triangles.push(Triangle::new(
+        Vec3::new(-0.5, -0.1, 0.0),
+        Vec3::new(0.0, 0.6, 0.0),
+        Vec3::new(0.5, -0.1, -0.4),
+    ));
 
     let light = Vec3::new(1.0, -3.4, 4.5).normalize();
 
