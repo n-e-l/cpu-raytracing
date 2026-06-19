@@ -1,15 +1,17 @@
+use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use glam::Vec3;
 use parry3d::query::PointQuery;
+use rayon::iter::IntoParallelIterator;
 
 struct Material {
     color: Vec3,
     reflective: bool
 }
 
-trait SdfObject {
+trait SdfObject: Sync {
     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)>;
     fn normal(&self, pos: Vec3) -> Vec3;
     fn material(&self) -> &Material;
@@ -131,10 +133,11 @@ impl Docecahedron {
             Vec3::new(phi, 1.0 / phi, 0.0),
         ];
 
+        let scale = 0.3f32;
         let mut tris = vertices.iter().map(|v| {
             Sphere {
                 radius: 0.1,
-                pos: *v,
+                pos: *v * scale,
                 material: Material {
                     color: Vec3::new(1.0, 1.0, 0.0),
                     reflective: false,
@@ -142,7 +145,7 @@ impl Docecahedron {
             }
         }).collect();
         Self {
-            scale: 1.0f32,
+            scale,
             tris
         }
     }
@@ -197,13 +200,14 @@ impl World {
     fn new() -> Self {
         Self {
             objects: vec![
-                Box::new(Floor {
-                y: -0.2,
-                material: Material {
-                    color: Vec3::new(0.5, 0.5, 0.5),
-                    reflective: false
-                }
-            })],
+            //     Box::new(Floor {
+            //     y: -0.2,
+            //     material: Material {
+            //         color: Vec3::new(0.5, 0.5, 0.5),
+            //         reflective: false
+            //     }
+            // })
+            ],
         }
     }
 
@@ -256,7 +260,7 @@ impl World {
 struct Sink {
     width: usize,
     height: usize,
-    data: Vec<u8>
+    data: Vec<Vec3>
 }
 
 impl Sink {
@@ -264,22 +268,18 @@ impl Sink {
         Self {
             width,
             height,
-            data: vec![0; width * height * 4]
-        }
-    }
-
-    fn set_pixel_u8(&mut self, x: usize, y: usize, color: [u8; 4]) {
-        for i in 0..4 {
-            self.data[(y * self.width + x) * 4 + i] = color[i];
+            data: vec![Vec3::ZERO; width * height]
         }
     }
 
     fn set_pixel(&mut self, x: usize, y: usize, color: Vec3) {
-        for i in 0..3 {
-            self.data[(y * self.width + x) * 4 + i] = (color[i] * 255f32) as u8;
-        }
-        // Alpha channel
-        self.data[(y * self.width + x) * 4 + 3] = 255u8;
+    }
+
+    fn get_mut_vec(&mut self) -> Vec<(usize, usize, &mut Vec3)> {
+        self.data.iter_mut()
+            .enumerate().map(|(i, data)| {
+            (i / self.width, i % self.width, data)
+        }).collect()
     }
 }
 
@@ -301,11 +301,22 @@ fn write_image(sink: Sink, path: &Path) {
     encoder.set_source_chromaticities(source_chromaticities);
     let mut writer = encoder.write_header().unwrap();
 
-    writer.write_image_data(&sink.data).unwrap();
+    // Convert Vec3 to u8
+    let u8_data = sink.data.iter().map(|pixel| {
+        vec![
+            (pixel.x * 255f32) as u8,
+            (pixel.y * 255f32) as u8,
+            (pixel.z * 255f32) as u8,
+            255u8
+        ]
+    }).flatten().collect::<Vec<u8>>();
+
+    writer.write_image_data(&u8_data).unwrap();
 }
 
 fn main() {
-    let mut sink = Sink::new(512, 512);
+    let size = 512;
+    let mut sink = Sink::new(size, size);
 
     let mut world = World::new();
 
@@ -333,10 +344,11 @@ fn main() {
 
     let light = Vec3::new(1.0, -3.4, 4.5).normalize();
 
-    for x in 0..sink.width {
-        for y in 0..sink.height {
-            let rx = x as f32 / sink.width as f32;
-            let ry = y as f32 / sink.height as f32;
+    sink.get_mut_vec()
+        .into_par_iter()
+        .for_each(|(x, y, data)| {
+            let rx = x as f32 / size as f32;
+            let ry = y as f32 / size as f32;
             let spread = 2.5;
             let ray_dir = Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize();
             let mut ray = Ray {
@@ -378,13 +390,13 @@ fn main() {
                 }
 
                 // object.normal(ray.at(dist)) * 0.5 + 0.5
-                sink.set_pixel(x, y, color);
+                *data = color;
             } else {
                 let color = Vec3::new(0f32, 0f32, 0f32);
-                sink.set_pixel(x, y, color);
+                *data = color;
             };
         }
-    }
+    );
 
     let path = Path::new("out.png");
     write_image(sink, path);
