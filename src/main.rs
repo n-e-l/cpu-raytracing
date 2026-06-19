@@ -49,11 +49,7 @@ struct Sphere {
 impl SdfObject for Sphere {
     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
         let d = (pos - self.pos).length() - self.radius;
-        if d <= 0.0 {
-            Some((d, self))
-        } else {
-            None
-        }
+        Some((d, self))
     }
 
     fn normal(&self, hit: Vec3) -> Vec3 {
@@ -99,7 +95,6 @@ impl SdfObject for Triangle {
 }
 
 struct Docecahedron {
-    scale: f32,
     tris: Vec<Sphere>
 }
 
@@ -136,7 +131,7 @@ impl Docecahedron {
         let scale = 0.3f32;
         let mut tris = vertices.iter().map(|v| {
             Sphere {
-                radius: 0.1,
+                radius: 1.0 / phi * scale,
                 pos: *v * scale,
                 material: Material {
                     color: Vec3::new(1.0, 1.0, 0.0),
@@ -145,7 +140,6 @@ impl Docecahedron {
             }
         }).collect();
         Self {
-            scale,
             tris
         }
     }
@@ -156,7 +150,7 @@ impl SdfObject for Docecahedron {
         let mut result: Option<(f32, &dyn SdfObject)> = None;
         for tri in &self.tris {
             if let Some(sub) = tri.sdf(pos) {
-                if result.is_none() || result.unwrap().0 < sub.0 {
+                if result.is_none() || sub.0 < result.unwrap().0 {
                     result = Some(sub);
                 }
             }
@@ -336,16 +330,17 @@ fn main() {
     //     }));
     // }
 
-    world.objects.push(Box::new(Triangle::new(
-        Vec3::new(-0.5, -0.1, 0.0),
-        Vec3::new(0.0, 0.6, 0.0),
-        Vec3::new(0.5, -0.1, -0.4),
-    )));
+    // world.objects.push(Box::new(Triangle::new(
+    //     Vec3::new(-0.5, -0.1, 0.0),
+    //     Vec3::new(0.0, 0.6, 0.0),
+    //     Vec3::new(0.5, -0.1, -0.4),
+    // )));
 
-    let light = Vec3::new(1.0, -3.4, 4.5).normalize();
+    let light_dir = Vec3::new(1.0, -3.4, 4.5).normalize();
 
     sink.get_mut_vec()
         .into_par_iter()
+        // .into_iter()
         .for_each(|(x, y, data)| {
             let rx = x as f32 / size as f32;
             let ry = y as f32 / size as f32;
@@ -377,17 +372,18 @@ fn main() {
                 let mut color = hit.object.material().color;
                 // let mut color = 1.0 - (Vec3::new(hit.distance, hit.distance, hit.distance) * 0.3) * hit.object.material().color;
 
-                let dot = hit.normal.dot(-light);
-                color *= dot;
+                let mut light = hit.normal.dot(-light_dir);
 
                 let shadowed = world.hit(Ray {
-                    origin: hit.point - light * 0.001,
-                    dir: -light
+                    origin: hit.point - light_dir * 0.001,
+                    dir: -light_dir
                 }).is_some();
 
                 if shadowed {
-                    color *= 0.5;
+                    light = f32::min(0.1, light);
                 }
+
+                color *= light;
 
                 // object.normal(ray.at(dist)) * 0.5 + 0.5
                 *data = color;
