@@ -3,7 +3,6 @@ use std::io::BufWriter;
 use std::path::Path;
 use glam::Vec3;
 use parry3d::query::PointQuery;
-use rayon::prelude::*;
 
 struct Material {
     color: Vec3,
@@ -24,7 +23,7 @@ struct Floor {
 impl SdfObject for Floor {
     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
         if pos.y <= self.y {
-            Some((self.y - pos.y, self))
+            Some((pos.y - self.y, self))
         } else {
             None
         }
@@ -97,35 +96,82 @@ impl SdfObject for Triangle {
     }
 }
 
-// struct Docecahedron {
-//     scale: f32
-// }
-//
-// impl Docecahedron {
-//     fn new() -> Self {
-//
-//     }
-// }
-//
-// impl SdfObject for Docecahedron {
-//     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
-//         let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
-//         todo!()
-//     }
-//
-//     fn normal(&self, pos: Vec3) -> Vec3 {
-//         todo!()
-//     }
-//
-//     fn material(&self) -> &Material {
-//         todo!()
-//     }
-// }
+struct Docecahedron {
+    scale: f32,
+    tris: Vec<Sphere>
+}
+
+impl Docecahedron {
+    fn new() -> Self {
+        let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
+        let vertices = vec![
+            // Orange vertices
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            // Green vertices
+            Vec3::new(0.0, -phi, -1.0 / phi),
+            Vec3::new(0.0, -phi, 1.0 / phi),
+            Vec3::new(0.0, phi, -1.0 / phi),
+            Vec3::new(0.0, phi, 1.0 / phi),
+            // Blue vertices
+            Vec3::new(-1.0 / phi, 0.0, -phi),
+            Vec3::new(1.0 / phi, 0.0, -phi),
+            Vec3::new(-1.0 / phi, 0.0, phi),
+            Vec3::new(1.0 / phi, 0.0, phi),
+            // Red vertices
+            Vec3::new(-phi, -1.0 / phi, 0.0),
+            Vec3::new(-phi, 1.0 / phi, 0.0),
+            Vec3::new(phi, -1.0 / phi, 0.0),
+            Vec3::new(phi, 1.0 / phi, 0.0),
+        ];
+
+        let mut tris = vertices.iter().map(|v| {
+            Sphere {
+                radius: 0.1,
+                pos: *v,
+                material: Material {
+                    color: Vec3::new(1.0, 1.0, 0.0),
+                    reflective: false,
+                },
+            }
+        }).collect();
+        Self {
+            scale: 1.0f32,
+            tris
+        }
+    }
+}
+
+impl SdfObject for Docecahedron {
+    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
+        let mut result: Option<(f32, &dyn SdfObject)> = None;
+        for tri in &self.tris {
+            if let Some(sub) = tri.sdf(pos) {
+                if result.is_none() || result.unwrap().0 < sub.0 {
+                    result = Some(sub);
+                }
+            }
+        }
+        result
+    }
+
+    fn normal(&self, pos: Vec3) -> Vec3 {
+        todo!()
+    }
+
+    fn material(&self) -> &Material {
+        todo!()
+    }
+}
 
 struct World {
-    spheres: Vec<Sphere>,
-    triangles: Vec<Triangle>,
-    floor: Option<Floor>
+    objects: Vec<Box<dyn SdfObject>>,
 }
 
 #[derive(Clone, Copy)]
@@ -150,43 +196,27 @@ struct Hit<'a> {
 impl World {
     fn new() -> Self {
         Self {
-            spheres: vec![],
-            triangles: vec![],
-            floor: Some(Floor {
+            objects: vec![
+                Box::new(Floor {
                 y: -0.2,
                 material: Material {
                     color: Vec3::new(0.5, 0.5, 0.5),
                     reflective: false
                 }
-            }),
+            })],
         }
     }
 
     fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
         let mut result: Option<(f32, &dyn SdfObject)> = None;
         let mut min = f32::MAX;
-        for sphere in &self.spheres {
-            let d = (sphere.pos - pos).length() - sphere.radius;
-            if d <= min {
-                min = d;
-                result = Some((d, sphere));
-            }
-        }
 
-        for triangle in &self.triangles {
-            if let Some((d, t)) = triangle.sdf(pos) {
+        for o in &self.objects {
+            if let Some((d, t)) = o.sdf(pos) {
                 if d <= min {
                     min = d;
                     result = Some((d, t));
                 }
-            }
-        }
-
-        if let Some(floor) = &self.floor {
-            let d = pos.y - floor.y;
-            if d <= min {
-                min = d;
-                result = Some((d, floor));
             }
         }
 
@@ -279,26 +309,27 @@ fn main() {
 
     let mut world = World::new();
 
-    for i in 0..15 {
-        world.spheres.push(Sphere {
-            radius: rand::random::<f32>() * 0.3,
-            pos: Vec3::new(
-                rand::random::<f32>() * 2.0 - 1.0,
-                rand::random::<f32>() * 1.0,
-                rand::random::<f32>() * 2.0 - 1.0,
-            ) * 0.7,
-            material: Material {
-                color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>()),
-                reflective: rand::random::<f32>() > 0.5
-            }
-        });
-    }
+    world.objects.push(Box::new(Docecahedron::new()));
+    // for i in 0..15 {
+    //     world.objects.push(Box::new(Sphere {
+    //         radius: rand::random::<f32>() * 0.3,
+    //         pos: Vec3::new(
+    //             rand::random::<f32>() * 2.0 - 1.0,
+    //             rand::random::<f32>() * 1.0,
+    //             rand::random::<f32>() * 2.0 - 1.0,
+    //         ) * 0.7,
+    //         material: Material {
+    //             color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>()),
+    //             reflective: rand::random::<f32>() > 0.5
+    //         }
+    //     }));
+    // }
 
-    world.triangles.push(Triangle::new(
+    world.objects.push(Box::new(Triangle::new(
         Vec3::new(-0.5, -0.1, 0.0),
         Vec3::new(0.0, 0.6, 0.0),
         Vec3::new(0.5, -0.1, -0.4),
-    ));
+    )));
 
     let light = Vec3::new(1.0, -3.4, 4.5).normalize();
 
