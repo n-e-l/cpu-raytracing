@@ -1,9 +1,11 @@
+use std::cmp::min;
 use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use glam::Vec3;
-use parry3d::query::PointQuery;
+use parry3d::math::{Pose, Rot3};
+use parry3d::query::{PointQuery, Ray, RayCast};
 use rayon::iter::IntoParallelIterator;
 
 struct Material {
@@ -11,9 +13,8 @@ struct Material {
     reflective: bool
 }
 
-trait SdfObject: Sync {
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)>;
-    fn normal(&self, pos: Vec3) -> Vec3;
+trait CastObject: Sync {
+    fn hit(&self, ray: &Ray) -> Option<Hit>;
     fn material(&self) -> &Material;
 }
 
@@ -22,38 +23,33 @@ struct Floor {
     material: Material
 }
 
-impl SdfObject for Floor {
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
-        if pos.y <= self.y {
-            Some((pos.y - self.y, self))
-        } else {
-            None
-        }
-    }
-
-    fn normal(&self, pos: Vec3) -> Vec3 {
-        Vec3::new(0.0, 1.0, 0.0)
-    }
-
-    fn material(&self) -> &Material {
-        &self.material
-    }
-}
-
 struct Sphere {
     radius: f32,
     pos: Vec3,
     material: Material
 }
 
-impl SdfObject for Sphere {
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
-        let d = (pos - self.pos).length() - self.radius;
-        Some((d, self))
-    }
+impl CastObject for Sphere {
+    fn hit(&self, ray: &Ray) -> Option<Hit> {
+        let p = Pose {
+            rotation: Rot3::IDENTITY,
+            translation: self.pos,
+            padding: 0
+        };
+        if let Some(hit) = parry3d::shape::Ball::new(self.radius).cast_ray_and_get_normal(
+            &p,
+            ray,
+            9999.0f32,
+            true
+        ) {
+            return Some(Hit {
+                distance: hit.time_of_impact,
+                object: self,
+                normal: hit.normal
+            })
+        }
 
-    fn normal(&self, hit: Vec3) -> Vec3 {
-        (hit - self.pos).normalize()
+        None
     }
 
     fn material(&self) -> &Material {
@@ -77,20 +73,6 @@ impl Triangle {
                 reflective: false
             }
         }
-    }
-}
-
-impl SdfObject for Triangle {
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
-        Some((self.g_triangle.distance_to_local_point(pos, true), self))
-    }
-
-    fn normal(&self, pos: Vec3) -> Vec3 {
-        self.g_triangle.normal().unwrap()
-    }
-
-    fn material(&self) -> &Material {
-        &self.material
     }
 }
 
@@ -145,48 +127,33 @@ impl Docecahedron {
     }
 }
 
-impl SdfObject for Docecahedron {
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
-        let mut result: Option<(f32, &dyn SdfObject)> = None;
-        for tri in &self.tris {
-            if let Some(sub) = tri.sdf(pos) {
-                if result.is_none() || sub.0 < result.unwrap().0 {
-                    result = Some(sub);
+impl CastObject for Docecahedron {
+    fn hit(&self, ray: &Ray) -> Option<Hit> {
+        let mut min_hit: Option<Hit> = None;
+
+        self.tris.iter().for_each(|o| {
+            if let Some(hit) = o.hit(&ray) {
+                if min_hit.is_none() || hit.distance < min_hit.as_ref().unwrap().distance {
+                    min_hit = Some(hit);
                 }
             }
-        }
-        result
-    }
+        });
 
-    fn normal(&self, pos: Vec3) -> Vec3 {
-        todo!()
+        min_hit
     }
 
     fn material(&self) -> &Material {
-        todo!()
+        self.material()
     }
 }
 
 struct World {
-    objects: Vec<Box<dyn SdfObject>>,
-}
-
-#[derive(Clone, Copy)]
-struct Ray {
-    origin: Vec3,
-    dir: Vec3
-}
-
-impl Ray {
-    pub fn at(&self, t: f32) -> Vec3 {
-        self.origin + self.dir * t
-    }
+    objects: Vec<Box<dyn CastObject>>,
 }
 
 struct Hit<'a> {
     distance: f32,
-    point: Vec3,
-    object: &'a dyn SdfObject,
+    object: &'a dyn CastObject,
     normal: Vec3
 }
 
@@ -205,49 +172,19 @@ impl World {
         }
     }
 
-    fn sdf(&self, pos: Vec3) -> Option<(f32, &dyn SdfObject)> {
-        let mut result: Option<(f32, &dyn SdfObject)> = None;
-        let mut min = f32::MAX;
-
-        for o in &self.objects {
-            if let Some((d, t)) = o.sdf(pos) {
-                if d <= min {
-                    min = d;
-                    result = Some((d, t));
-                }
-            }
-        }
-
-        result
-    }
-
     fn hit(&self, ray: Ray) -> Option<Hit> {
 
-        if self.sdf(ray.origin).is_none() {
-            return None;
-        }
+        let mut min_hit: Option<Hit> = None;
 
-        let mut dist = 0.0;
-        for i in 0..300 {
-            let (t, object) = self.sdf(ray.origin + ray.dir * dist).unwrap();
-
-            dist += t;
-            if t < 0.0001 {
-                let point = ray.origin + ray.dir * dist;
-                return Some(Hit {
-                    distance: dist,
-                    point,
-                    object: object,
-                    normal: object.normal(point)
-                });
+        self.objects.iter().for_each(|o| {
+            if let Some(hit) = o.hit(&ray) {
+                if min_hit.is_none() || hit.distance < min_hit.as_ref().unwrap().distance {
+                    min_hit = Some(hit);
+                }
             }
+        });
 
-            if t > 1000.0 {
-                break;
-            }
-        }
-
-        None
+        min_hit
     }
 }
 
@@ -264,9 +201,6 @@ impl Sink {
             height,
             data: vec![Vec3::ZERO; width * height]
         }
-    }
-
-    fn set_pixel(&mut self, x: usize, y: usize, color: Vec3) {
     }
 
     fn get_mut_vec(&mut self) -> Vec<(usize, usize, &mut Vec3)> {
@@ -361,8 +295,9 @@ fn main() {
 
                 // Calculate the reflection
                 let reflect = ray.dir - hit.normal * 2.0 * hit.normal.dot(ray.dir);
+                let point = ray.point_at(hit.distance);
                 ray = Ray {
-                    origin: hit.point + reflect * 0.001,
+                    origin: point + reflect * 0.001,
                     dir: reflect
                 };
             }
@@ -373,9 +308,10 @@ fn main() {
                 // let mut color = 1.0 - (Vec3::new(hit.distance, hit.distance, hit.distance) * 0.3) * hit.object.material().color;
 
                 let mut light = hit.normal.dot(-light_dir);
+                let point = ray.point_at(hit.distance);
 
                 let shadowed = world.hit(Ray {
-                    origin: hit.point - light_dir * 0.001,
+                    origin: point - light_dir * 0.001,
                     dir: -light_dir
                 }).is_some();
 
