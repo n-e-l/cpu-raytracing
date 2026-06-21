@@ -6,6 +6,7 @@ use std::path::Path;
 use glam::Vec3;
 use parry3d::math::{Pose, Rot3};
 use parry3d::query::{PointQuery, Ray, RayCast};
+use parry3d::shape::Triangle;
 use rayon::iter::IntoParallelIterator;
 
 struct Material {
@@ -57,22 +58,84 @@ impl CastObject for Sphere {
     }
 }
 
-struct Triangle {
-    g_triangle: parry3d::shape::Triangle,
-    material: Material
+struct PentSlice {
+    material: Material,
+    tris: Vec<Triangle>
 }
 
-impl Triangle {
-    fn new(a: Vec3, b: Vec3, c: Vec3) -> Self {
-        Self {
-            g_triangle: parry3d::shape::Triangle::new(
-                a, b, c
+impl PentSlice {
+    fn new(material: Material) -> Self {
+        let scale = 0.3f32;
+        let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
+        let vertices = vec![
+            // Orange vertices
+            scale * Vec3::new(0.0, phi, -1.0 / phi),
+            scale * Vec3::new(0.0, phi, 1.0 / phi),
+            scale * Vec3::new(1.0, 1.0, 1.0),
+            scale * Vec3::new(phi, 1.0 / phi, 0.0),
+            scale * Vec3::new(1.0, 1.0, -1.0),
+        ];
+
+        let tris = vec![
+            Triangle::new(
+                Vec3::ZERO,
+                vertices[0],
+                vertices[1],
             ),
-            material: Material {
-                color: Vec3::new(1.0, 0.0, 0.0),
-                reflective: false
-            }
+            Triangle::new(
+                Vec3::ZERO,
+                vertices[1],
+                vertices[2],
+            ),
+            Triangle::new(
+                Vec3::ZERO,
+                vertices[2],
+                vertices[3],
+            ),
+            Triangle::new(
+                Vec3::ZERO,
+                vertices[3],
+                vertices[4],
+            ),
+            Triangle::new(
+                Vec3::ZERO,
+                vertices[4],
+                vertices[0],
+            ),
+        ];
+
+        Self {
+            material,
+            tris
         }
+    }
+}
+
+impl CastObject for PentSlice {
+    fn hit(&self, ray: &Ray) -> Option<Hit> {
+        let mut min_hit: Option<Hit> = None;
+
+        self.tris.iter().for_each(|o| {
+            if let Some(hit) = o.cast_local_ray_and_get_normal(
+                ray,
+                9999.0f32,
+                true
+            ) {
+                if min_hit.is_none() || hit.time_of_impact < min_hit.as_ref().unwrap().distance {
+                    min_hit = Some(Hit {
+                        distance: hit.time_of_impact,
+                        object: self,
+                        normal: hit.normal
+                    });
+                }
+            }
+        });
+
+        min_hit
+    }
+
+    fn material(&self) -> &Material {
+        &self.material
     }
 }
 
@@ -248,7 +311,13 @@ fn main() {
 
     let mut world = World::new();
 
-    world.objects.push(Box::new(Docecahedron::new()));
+    world.objects.push(Box::new(PentSlice::new(
+        Material {
+            color: Vec3::new(0.0, 1.0, 1.0),
+            reflective: false
+        }
+    )));
+    // world.objects.push(Box::new(Docecahedron::new()));
     // for i in 0..15 {
     //     world.objects.push(Box::new(Sphere {
     //         radius: rand::random::<f32>() * 0.3,
@@ -273,8 +342,8 @@ fn main() {
     let light_dir = Vec3::new(1.0, -3.4, 4.5).normalize();
 
     sink.get_mut_vec()
-        .into_par_iter()
-        // .into_iter()
+        // .into_par_iter()
+        .into_iter()
         .for_each(|(x, y, data)| {
             let rx = x as f32 / size as f32;
             let ry = y as f32 / size as f32;
@@ -315,8 +384,10 @@ fn main() {
                     dir: -light_dir
                 }).is_some();
 
+                light = f32::max(0.1f32, light);
+
                 if shadowed {
-                    light = f32::min(0.1, light);
+                    // light = f32::min(0.1, light);
                 }
 
                 color *= light;
