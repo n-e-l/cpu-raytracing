@@ -10,6 +10,7 @@ use parry3d::shape;
 use parry3d::shape::{ConvexPolyhedron, Triangle};
 use rand::{random, random_range};
 use rayon::iter::IntoParallelIterator;
+use crate::PentFace::Tri;
 
 #[derive(Copy, Clone)]
 struct Material {
@@ -174,7 +175,43 @@ impl PentSlice {
                 }
             }
             PentFace::Pent => {
+                let face = Triangle::new(
+                    self.vertices[1],
+                    self.vertices[3],
+                    self.vertices[4],
+                );
 
+                for v in &mut vertices {
+                    let mut is_face = false;
+                    for fv in face.vertices() {
+                        if fv == v {
+                            is_face = true;
+                            break;
+                        }
+                    }
+
+                    if !is_face {
+                        let pose = Pose {
+                            rotation: Rot3::IDENTITY,
+                            translation: face.a,
+                            padding: 0
+                        };
+
+                        // Invert the vertex along the face
+                        let space = parry3d::shape::HalfSpace::new(face.robust_normal());
+                        let projected = space.project_point(
+                            &pose,
+                            v.clone(),
+                            false
+                        ).point;
+                        let dist = space.distance_to_point(
+                            &pose,
+                            v.clone(),
+                            false
+                        );
+                        *v = projected - dist * face.normal().unwrap();
+                    }
+                }
             }
         }
 
@@ -479,14 +516,6 @@ fn main() {
     slice.material.color = Vec3::new(random(), random(), random());
     world.objects.push(Box::new(slice.clone()));
 
-    slice = slice.flip(PentFace::Tri(4));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
-
-    slice = slice.flip(PentFace::Tri(1));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
-
     slice = slice.flip(PentFace::Tri(3));
     slice.material.color = Vec3::new(random(), random(), random());
     world.objects.push(Box::new(slice.clone()));
@@ -494,10 +523,22 @@ fn main() {
     slice = slice.flip(PentFace::Tri(4));
     slice.material.color = Vec3::new(random(), random(), random());
     world.objects.push(Box::new(slice.clone()));
-
-    slice = slice.flip(PentFace::Tri(2));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
+    //
+    // slice = slice.flip(PentFace::Tri(1));
+    // slice.material.color = Vec3::new(random(), random(), random());
+    // world.objects.push(Box::new(slice.clone()));
+    //
+    // slice = slice.flip(PentFace::Tri(3));
+    // slice.material.color = Vec3::new(random(), random(), random());
+    // world.objects.push(Box::new(slice.clone()));
+    //
+    // slice = slice.flip(PentFace::Tri(4));
+    // slice.material.color = Vec3::new(random(), random(), random());
+    // world.objects.push(Box::new(slice.clone()));
+    //
+    // slice = slice.flip(PentFace::Tri(2));
+    // slice.material.color = Vec3::new(random(), random(), random());
+    // world.objects.push(Box::new(slice.clone()));
 
     // world.objects.push(Box::new(Docecahedron::new()));
     // for i in 0..15 {
@@ -521,7 +562,7 @@ fn main() {
     //     Vec3::new(0.5, -0.1, -0.4),
     // )));
 
-    let light_dir = Vec3::new(1.0, -3.4, 4.5).normalize();
+    let light_dir = Vec3::new(4.0, -1.4, 0.5).normalize();
 
     sink.get_mut_vec()
         .into_par_iter()
@@ -569,7 +610,7 @@ fn main() {
                 light = f32::max(0.4f32, light);
 
                 if shadowed {
-                    // light = f32::min(0.1, light);
+                    light = f32::min(0.2, light);
                 }
 
                 color *= light;
