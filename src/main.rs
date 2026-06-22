@@ -6,9 +6,12 @@ use std::path::Path;
 use glam::Vec3;
 use parry3d::math::{Pose, Rot3};
 use parry3d::query::{PointQuery, Ray, RayCast};
-use parry3d::shape::Triangle;
+use parry3d::shape;
+use parry3d::shape::{ConvexPolyhedron, Triangle};
+use rand::{random, random_range};
 use rayon::iter::IntoParallelIterator;
 
+#[derive(Copy, Clone)]
 struct Material {
     color: Vec3,
     reflective: bool
@@ -58,9 +61,17 @@ impl CastObject for Sphere {
     }
 }
 
+#[derive(Clone)]
 struct PentSlice {
+    vertices: Vec<Vec3>,
     material: Material,
+    pent: ConvexPolyhedron,
     tris: Vec<Triangle>
+}
+
+enum PentFace {
+    Tri(usize),
+    Pent
 }
 
 impl PentSlice {
@@ -68,7 +79,7 @@ impl PentSlice {
         let scale = 0.3f32;
         let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
         let vertices = vec![
-            // Orange vertices
+            Vec3::ZERO,
             scale * Vec3::new(0.0, phi, -1.0 / phi),
             scale * Vec3::new(0.0, phi, 1.0 / phi),
             scale * Vec3::new(1.0, 1.0, 1.0),
@@ -78,35 +89,139 @@ impl PentSlice {
 
         let tris = vec![
             Triangle::new(
-                Vec3::ZERO,
                 vertices[0],
-                vertices[1],
-            ),
-            Triangle::new(
-                Vec3::ZERO,
                 vertices[1],
                 vertices[2],
             ),
             Triangle::new(
-                Vec3::ZERO,
+                vertices[0],
                 vertices[2],
                 vertices[3],
             ),
             Triangle::new(
-                Vec3::ZERO,
+                vertices[0],
                 vertices[3],
                 vertices[4],
             ),
             Triangle::new(
-                Vec3::ZERO,
-                vertices[4],
                 vertices[0],
+                vertices[4],
+                vertices[5],
+            ),
+            Triangle::new(
+                vertices[0],
+                vertices[5],
+                vertices[1],
             ),
         ];
 
+        let pent_verts = vec![
+            vertices[1],
+            vertices[2],
+            vertices[3],
+            vertices[4],
+            vertices[5],
+        ];
+        let pent = shape::ConvexPolyhedron::from_convex_hull(
+            &pent_verts
+        ).unwrap();
+
         Self {
+            vertices,
             material,
+            pent,
             tris
+        }
+    }
+
+    pub fn flip(&self, face: PentFace) -> PentSlice {
+        let mut vertices = self.vertices.clone();
+
+        match face {
+            PentFace::Tri(face_index) => {
+                let face = &self.tris[face_index];
+
+                for v in &mut vertices {
+                    let mut is_face = false;
+                    for fv in face.vertices() {
+                        if fv == v {
+                            is_face = true;
+                            break;
+                        }
+                    }
+
+                    if !is_face {
+                        let pose = Pose {
+                            rotation: Rot3::IDENTITY,
+                            translation: face.a,
+                            padding: 0
+                        };
+
+                        // Invert the vertex along the face
+                        let space = parry3d::shape::HalfSpace::new(face.robust_normal());
+                        let projected = space.project_point(
+                            &pose,
+                            v.clone(),
+                            false
+                        ).point;
+                        let dist = space.distance_to_point(
+                            &pose,
+                            v.clone(),
+                            false
+                        );
+                        *v = projected - dist * face.normal().unwrap();
+                    }
+                }
+            }
+            PentFace::Pent => {
+
+            }
+        }
+
+        let tris = vec![
+            Triangle::new(
+                vertices[0],
+                vertices[2],
+                vertices[1],
+            ),
+            Triangle::new(
+                vertices[0],
+                vertices[3],
+                vertices[2],
+            ),
+            Triangle::new(
+                vertices[0],
+                vertices[4],
+                vertices[3],
+            ),
+            Triangle::new(
+                vertices[0],
+                vertices[5],
+                vertices[4],
+            ),
+            Triangle::new(
+                vertices[0],
+                vertices[1],
+                vertices[5],
+            ),
+        ];
+
+        let pent_verts = vec![
+            vertices[1],
+            vertices[2],
+            vertices[3],
+            vertices[4],
+            vertices[5],
+        ];
+        let pent = shape::ConvexPolyhedron::from_convex_hull(
+            &pent_verts
+        ).unwrap();
+
+        PentSlice {
+            vertices,
+            tris,
+            pent,
+            material: self.material
         }
     }
 }
@@ -130,6 +245,43 @@ impl CastObject for PentSlice {
                 }
             }
         });
+
+        if let Some(hit) = self.pent.cast_local_ray_and_get_normal(
+            ray,
+            9999.0f32,
+            true
+        ) {
+            if min_hit.is_none() || hit.time_of_impact < min_hit.as_ref().unwrap().distance {
+                min_hit = Some(Hit {
+                    distance: hit.time_of_impact,
+                    object: self,
+                    normal: hit.normal
+                });
+            }
+        }
+
+        // let radius = 0.02f32;
+        // self.vertices.iter().for_each(|o| {
+        //     let p = Pose {
+        //         rotation: Rot3::IDENTITY,
+        //         translation: *o,
+        //         padding: 0
+        //     };
+        //     if let Some(hit) = parry3d::shape::Ball::new(radius).cast_ray_and_get_normal(
+        //         &p,
+        //         ray,
+        //         9999.0f32,
+        //         true
+        //     ) {
+        //         if min_hit.is_none() || hit.time_of_impact < min_hit.as_ref().unwrap().distance {
+        //             min_hit = Some(Hit {
+        //                 distance: hit.time_of_impact,
+        //                 object: self,
+        //                 normal: hit.normal
+        //             });
+        //         }
+        //     }
+        // });
 
         min_hit
     }
@@ -269,7 +421,7 @@ impl Sink {
     fn get_mut_vec(&mut self) -> Vec<(usize, usize, &mut Vec3)> {
         self.data.iter_mut()
             .enumerate().map(|(i, data)| {
-            (i / self.width, i % self.width, data)
+            (i % self.width, i / self.width, data)
         }).collect()
     }
 }
@@ -311,12 +463,42 @@ fn main() {
 
     let mut world = World::new();
 
-    world.objects.push(Box::new(PentSlice::new(
+    let mut slice = PentSlice::new(
         Material {
             color: Vec3::new(0.0, 1.0, 1.0),
             reflective: false
         }
-    )));
+    );
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(3));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(1));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(4));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(1));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(3));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(4));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
+    slice = slice.flip(PentFace::Tri(2));
+    slice.material.color = Vec3::new(random(), random(), random());
+    world.objects.push(Box::new(slice.clone()));
+
     // world.objects.push(Box::new(Docecahedron::new()));
     // for i in 0..15 {
     //     world.objects.push(Box::new(Sphere {
@@ -342,8 +524,8 @@ fn main() {
     let light_dir = Vec3::new(1.0, -3.4, 4.5).normalize();
 
     sink.get_mut_vec()
-        // .into_par_iter()
-        .into_iter()
+        .into_par_iter()
+        // .into_iter()
         .for_each(|(x, y, data)| {
             let rx = x as f32 / size as f32;
             let ry = y as f32 / size as f32;
@@ -384,7 +566,7 @@ fn main() {
                     dir: -light_dir
                 }).is_some();
 
-                light = f32::max(0.1f32, light);
+                light = f32::max(0.4f32, light);
 
                 if shadowed {
                     // light = f32::min(0.1, light);
