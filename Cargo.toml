@@ -17,5 +17,6 @@ rand = "0.10.1"
 rayon = "1.12.0"
 parry3d = "0.28.0"
 petgraph = "0.8.3"
+indicatif = { version = "0.18.4", features = ["rayon"] }
 
 [dev-dependencies]

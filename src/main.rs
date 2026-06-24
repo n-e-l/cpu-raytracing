@@ -1,17 +1,21 @@
+use indicatif::ParallelProgressIterator;
 use std::cmp::min;
 use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::BufWriter;
 use std::ops::Mul;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use glam::Vec3;
+use indicatif::ProgressIterator;
 use parry3d::math::{Pose, Rot3};
 use parry3d::query::{intersection_test, PointQuery, Ray, RayCast};
 use parry3d::shape;
-use parry3d::shape::{CompositeShape, Compound, ConvexPolyhedron, Shape, SharedShape, Triangle};
+use parry3d::shape::{CompositeShape, Compound, ConvexPolyhedron, FeatureId, Shape, SharedShape, TriMesh, Triangle};
 use petgraph::data::Build;
 use petgraph::Graph;
-use rand::{random, random_range};
+use rand::{random, random_bool, random_range};
 use rayon::iter::IntoParallelIterator;
 use crate::PentFace::{Pent, Tri};
 
@@ -71,7 +75,8 @@ struct PentSlice {
     vertices: Vec<Vec3>,
     material: Material,
     pent: ConvexPolyhedron,
-    compound: Compound,
+    mesh: TriMesh,
+    scaled_mesh: TriMesh,
     tris: Vec<Triangle>,
 }
 
@@ -145,21 +150,30 @@ impl PentSlice {
             &pent_verts
         ).unwrap();
 
-        let compound = shape::Compound::new(
-            vec![
-                (Pose::identity(), SharedShape::new(tris[0])),
-                (Pose::identity(), SharedShape::new(tris[1])),
-                (Pose::identity(), SharedShape::new(tris[2])),
-                (Pose::identity(), SharedShape::new(tris[3])),
-                (Pose::identity(), SharedShape::new(tris[4])),
-                (Pose::identity(), SharedShape::new(pent.clone())),
-            ]
-        );
+        let indices: Vec<[u32; 3]> = vec![
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 4],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 2, 3],
+            [1, 3, 4],
+            [1, 4, 5],
+        ];
+
+        let mesh = TriMesh::new(
+            vertices.clone(),
+            indices
+        ).unwrap();
+
+        let scale = Vec3::new(0.9, 0.9, 0.9);
+        let scaled_mesh = mesh.clone().scaled(scale);
 
         Self {
             vertices,
             material,
-            compound,
+            mesh,
+            scaled_mesh,
             pose: Pose::from_translation(center),
             pent,
             tris
@@ -302,24 +316,33 @@ impl PentSlice {
             &pent_verts
         ).unwrap();
 
-        let compound = shape::Compound::new(
-            vec![
-                (Pose::identity(), SharedShape::new(tris[0])),
-                (Pose::identity(), SharedShape::new(tris[1])),
-                (Pose::identity(), SharedShape::new(tris[2])),
-                (Pose::identity(), SharedShape::new(tris[3])),
-                (Pose::identity(), SharedShape::new(tris[4])),
-                (Pose::identity(), SharedShape::new(pent.clone())),
-            ]
-        );
+        let indices: Vec<[u32; 3]> = vec![
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 4],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 2, 3],
+            [1, 3, 4],
+            [1, 4, 5],
+        ];
+
+        let mesh = TriMesh::new(
+            vertices.clone(),
+            indices
+        ).unwrap();
+
+        let scale = Vec3::new(0.8, 0.8, 0.8);
+        let scaled_mesh = mesh.clone().scaled(scale);
 
         PentSlice {
             pose: Pose::from_translation(center),
             vertices,
             tris,
+            mesh,
+            scaled_mesh,
             pent,
-            compound,
-            material: self.material
+            material: self.material,
         }
     }
 }
@@ -328,25 +351,7 @@ impl CastObject for PentSlice {
     fn hit(&self, ray: &Ray) -> Option<Hit> {
         let mut min_hit: Option<Hit> = None;
 
-        let scale = Vec3::new(0.8, 0.8, 0.8);
-        self.tris.iter().for_each(|o| {
-            if let Some(hit) = o.scaled(scale).cast_ray_and_get_normal(
-                &self.pose,
-                ray,
-                9999.0f32,
-                true
-            ) {
-                if min_hit.is_none() || hit.time_of_impact < min_hit.as_ref().unwrap().distance {
-                    min_hit = Some(Hit {
-                        distance: hit.time_of_impact,
-                        object: self,
-                        normal: hit.normal
-                    });
-                }
-            }
-        });
-
-        if let Some(hit) = self.pent.clone().scaled(scale).unwrap().cast_ray_and_get_normal(
+        if let Some(hit) = self.scaled_mesh.cast_ray_and_get_normal(
             &self.pose,
             ray,
             9999.0f32,
@@ -360,29 +365,6 @@ impl CastObject for PentSlice {
                 });
             }
         }
-
-        // let radius = 0.02f32;
-        // self.vertices.iter().for_each(|o| {
-        //     let p = Pose {
-        //         rotation: Rot3::IDENTITY,
-        //         translation: *o,
-        //         padding: 0
-        //     };
-        //     if let Some(hit) = parry3d::shape::Ball::new(radius).cast_ray_and_get_normal(
-        //         &p,
-        //         ray,
-        //         9999.0f32,
-        //         true
-        //     ) {
-        //         if min_hit.is_none() || hit.time_of_impact < min_hit.as_ref().unwrap().distance {
-        //             min_hit = Some(Hit {
-        //                 distance: hit.time_of_impact,
-        //                 object: self,
-        //                 normal: hit.normal
-        //             });
-        //         }
-        //     }
-        // });
 
         min_hit
     }
@@ -487,6 +469,25 @@ fn write_image(sink: Sink, path: &Path) {
     writer.write_image_data(&u8_data).unwrap();
 }
 
+fn build_uber(slices: &[PentSlice]) -> (TriMesh, Vec<Material>) {
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+    let mut materials: Vec<Material> = Vec::new();
+
+    for s in slices {
+        let base = verts.len() as u32;
+        // pose is translation-only here, so bake it directly
+        for v in s.scaled_mesh.vertices() {
+            verts.push(*v + s.pose.translation);
+        }
+        for tri in s.scaled_mesh.indices() {
+            indices.push([tri[0] + base, tri[1] + base, tri[2] + base]);
+            materials.push(s.material); // one entry per triangle
+        }
+    }
+    (TriMesh::new(verts, indices).unwrap(), materials)
+}
+
 fn main() {
     let mut graph = Graph::<PentSlice, ()>::new();
 
@@ -502,26 +503,28 @@ fn main() {
         }
     );
     world.objects.push(Box::new(slice.clone()));
-    let mut last_index = graph.add_node(slice.clone());
+    let mut slices = vec![slice.clone()];
 
-    let scale = Vec3::new(0.9, 0.9, 0.9);
-    for i in 0..62 {
+    let count = 492;
+    for i in 0..count {
 
-        let dir = if i % 8 == 0 {
+        let dir = if i > 10 && i % 81 == 0 {
+            slice = slices[slices.len() - 10].clone();
             PentFace::Pent
-            // PentFace::Tri(0)
+        } else if i % 7 == 0 {
+            PentFace::Pent
         } else {
-            PentFace::Tri((i + 1) % 5)
+            PentFace::Tri((i + 2) % 5)
         };
 
         slice = slice.flip(dir);
         // slice.material.color = Vec3::new(random(), random(), random());
-        slice.material.color = Vec3::new(1.0, 0.0, 0.0);
+        let t = i as f32 / count as f32;
+        slice.material.color = Vec3::new(1.0, 0.0, 0.0) * t + Vec3::new(1.0, 1.0, 1.0) * (1.0 - t);
 
         // Check if there's any intersection
         let collides = graph.raw_nodes().iter().any(|n| {
-            let collision_slice = &n.weight.compound.clone().scale_dyn(scale, 1).unwrap();
-            if intersection_test(&slice.pose, &slice.compound, &n.weight.pose, collision_slice.as_ref()).unwrap() {
+            if intersection_test(&slice.pose, &slice.mesh, &n.weight.pose, &n.weight.mesh).unwrap() {
                 return true;
             }
             false
@@ -533,71 +536,58 @@ fn main() {
 
         // Add the pent for raycasting
         world.objects.push(Box::new(slice.clone()));
+        slices.push(slice.clone());
     }
 
     println!("Finished computing mesh");
 
-    // world.objects.push(Box::new(Docecahedron::new()));
-    // for i in 0..15 {
-    //     world.objects.push(Box::new(Sphere {
-    //         radius: rand::random::<f32>() * 0.3,
-    //         pos: Vec3::new(
-    //             rand::random::<f32>() * 2.0 - 1.0,
-    //             rand::random::<f32>() * 1.0,
-    //             rand::random::<f32>() * 2.0 - 1.0,
-    //         ) * 0.7,
-    //         material: Material {
-    //             color: Vec3::new(rand::random::<f32>(), rand::random::<f32>(), rand::random::<f32>()),
-    //             reflective: rand::random::<f32>() > 0.5
-    //         }
-    //     }));
-    // }
+    // Generate world mesh to optimize ray traversal
+    let (uber, materials) = build_uber(&slices);
 
-    // world.objects.push(Box::new(Triangle::new(
-    //     Vec3::new(-0.5, -0.1, 0.0),
-    //     Vec3::new(0.0, 0.6, 0.0),
-    //     Vec3::new(0.5, -0.1, -0.4),
-    // )));
+    let light_dir = Vec3::new(2.0, -0.4, 2.8).normalize();
+    let total = size * size; // or sink.get_mut_vec().len()
 
-    let light_dir = Vec3::new(4.0, -0.4, 1.8).normalize();
+    let target = Vec3::new(-1.0, 0.0, -10.0);           // center of the scene
+    let radius = 32.5;
+    let height = 1.93;
+    let angle: f32 = -1.7;              // azimuth in radians — this is what you sweep
 
+    let eye = target + Vec3::new(angle.sin() * radius, height, -angle.cos() * radius);
+
+    // look-at basis
+    let world_up = Vec3::Y;
+    let forward = (target - eye).normalize();
+    let right   = forward.cross(world_up).normalize();
+    let up      = right.cross(forward);
+    let spread = 2.5;
+
+    let start_time = Instant::now();
     sink.get_mut_vec()
         .into_par_iter()
+        .progress_count(total as u64)
         // .into_iter()
         .for_each(|(x, y, data)| {
             let rx = x as f32 / size as f32;
             let ry = y as f32 / size as f32;
-            let spread = 2.5;
-            let ray_dir = Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize();
-            let mut ray = Ray {
-                origin: Vec3::new(0.0, 2.33, -7.4),
-                dir: ray_dir
-            };
 
-            let mut final_hit = None;
-            while let Some(hit) = world.hit(ray) {
-                // Exit on first non reflective object
-                if !hit.object.material().reflective {
-                    final_hit = Some(hit);
-                    break;
-                }
+            let px = rx * 2.0 - 1.0;
+            let py = -ry * 2.0 + 1.0;
+            let ray_dir = (right * px + up * py + forward * spread).normalize();
+            let mut ray = Ray { origin: eye, dir: ray_dir };
 
-                // Calculate the reflection
-                let reflect = ray.dir - hit.normal * 2.0 * hit.normal.dot(ray.dir);
-                let point = ray.point_at(hit.distance);
-                ray = Ray {
-                    origin: point + reflect * 0.001,
-                    dir: reflect
+            if let Some(hit) = uber.cast_ray_and_get_normal(&Pose::identity(), &ray, 9999.0, true) {
+                let face = match hit.feature {
+                    FeatureId::Face(i) => i,
+                    _ => 0,
                 };
-            }
+                let tri_id = face as usize % materials.len(); // see caveat below
+                let mat = materials[tri_id];
 
-            if let Some(mut hit) = final_hit {
-
-                let mut color = hit.object.material().color;
+                let mut color = mat.color;
                 // let mut color = 1.0 - (Vec3::new(hit.distance, hit.distance, hit.distance) * 0.3) * hit.object.material().color;
 
                 let mut light = hit.normal.dot(-light_dir);
-                let point = ray.point_at(hit.distance);
+                let point = ray.point_at(hit.time_of_impact);
 
                 let shadowed = world.hit(Ray {
                     origin: point - light_dir * 0.001,
@@ -621,6 +611,9 @@ fn main() {
             };
         }
     );
+
+    let duration = Instant::now().duration_since(start_time).as_millis() as f32 / 1000.0;
+    println!("Took {duration} seconds");
 
     let path = Path::new("out.png");
     write_image(sink, path);
