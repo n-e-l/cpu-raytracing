@@ -2,15 +2,18 @@ use std::cmp::min;
 use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::BufWriter;
+use std::ops::Mul;
 use std::path::Path;
 use glam::Vec3;
 use parry3d::math::{Pose, Rot3};
-use parry3d::query::{PointQuery, Ray, RayCast};
+use parry3d::query::{intersection_test, PointQuery, Ray, RayCast};
 use parry3d::shape;
-use parry3d::shape::{ConvexPolyhedron, Triangle};
+use parry3d::shape::{CompositeShape, Compound, ConvexPolyhedron, Shape, SharedShape, Triangle};
+use petgraph::data::Build;
+use petgraph::Graph;
 use rand::{random, random_range};
 use rayon::iter::IntoParallelIterator;
-use crate::PentFace::Tri;
+use crate::PentFace::{Pent, Tri};
 
 #[derive(Copy, Clone)]
 struct Material {
@@ -64,10 +67,12 @@ impl CastObject for Sphere {
 
 #[derive(Clone)]
 struct PentSlice {
+    pose: Pose,
     vertices: Vec<Vec3>,
     material: Material,
     pent: ConvexPolyhedron,
-    tris: Vec<Triangle>
+    compound: Compound,
+    tris: Vec<Triangle>,
 }
 
 enum PentFace {
@@ -77,9 +82,10 @@ enum PentFace {
 
 impl PentSlice {
     fn new(material: Material) -> Self {
+
         let scale = 0.3f32;
         let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
-        let vertices = vec![
+        let mut vertices = vec![
             Vec3::ZERO,
             scale * Vec3::new(0.0, phi, -1.0 / phi),
             scale * Vec3::new(0.0, phi, 1.0 / phi),
@@ -87,6 +93,18 @@ impl PentSlice {
             scale * Vec3::new(phi, 1.0 / phi, 0.0),
             scale * Vec3::new(1.0, 1.0, -1.0),
         ];
+
+        // Calculate the center pos
+        let mut center = Vec3::ZERO;
+        vertices.iter().for_each(|v| {
+            center += v;
+        });
+        center = center / vertices.len() as f32;
+
+        // Move the vertices around the center pos
+        vertices.iter_mut().for_each(|mut v| {
+            *v -= center;
+        });
 
         let tris = vec![
             Triangle::new(
@@ -127,9 +145,22 @@ impl PentSlice {
             &pent_verts
         ).unwrap();
 
+        let compound = shape::Compound::new(
+            vec![
+                (Pose::identity(), SharedShape::new(tris[0])),
+                (Pose::identity(), SharedShape::new(tris[1])),
+                (Pose::identity(), SharedShape::new(tris[2])),
+                (Pose::identity(), SharedShape::new(tris[3])),
+                (Pose::identity(), SharedShape::new(tris[4])),
+                (Pose::identity(), SharedShape::new(pent.clone())),
+            ]
+        );
+
         Self {
             vertices,
             material,
+            compound,
+            pose: Pose::from_translation(center),
             pent,
             tris
         }
@@ -137,6 +168,11 @@ impl PentSlice {
 
     pub fn flip(&self, face: PentFace) -> PentSlice {
         let mut vertices = self.vertices.clone();
+
+        // Apply center to the vertices
+        vertices.iter_mut().for_each(|mut v| {
+            *v += self.pose.translation;
+        });
 
         match face {
             PentFace::Tri(face_index) => {
@@ -154,7 +190,7 @@ impl PentSlice {
                     if !is_face {
                         let pose = Pose {
                             rotation: Rot3::IDENTITY,
-                            translation: face.a,
+                            translation: face.a + self.pose.translation,
                             padding: 0
                         };
 
@@ -176,9 +212,9 @@ impl PentSlice {
             }
             PentFace::Pent => {
                 let face = Triangle::new(
-                    self.vertices[1],
-                    self.vertices[3],
-                    self.vertices[4],
+                    self.vertices[1] + self.pose.translation,
+                    self.vertices[3] + self.pose.translation,
+                    self.vertices[4] + self.pose.translation,
                 );
 
                 for v in &mut vertices {
@@ -215,6 +251,18 @@ impl PentSlice {
             }
         }
 
+        // Calculate the center pos
+        let mut center = Vec3::ZERO;
+        vertices.iter().for_each(|v| {
+            center += v;
+        });
+        center = center / vertices.len() as f32;
+
+        // Move the vertices around the center pos
+        vertices.iter_mut().for_each(|mut v| {
+            *v -= center;
+        });
+
         let tris = vec![
             Triangle::new(
                 vertices[0],
@@ -254,10 +302,23 @@ impl PentSlice {
             &pent_verts
         ).unwrap();
 
+        let compound = shape::Compound::new(
+            vec![
+                (Pose::identity(), SharedShape::new(tris[0])),
+                (Pose::identity(), SharedShape::new(tris[1])),
+                (Pose::identity(), SharedShape::new(tris[2])),
+                (Pose::identity(), SharedShape::new(tris[3])),
+                (Pose::identity(), SharedShape::new(tris[4])),
+                (Pose::identity(), SharedShape::new(pent.clone())),
+            ]
+        );
+
         PentSlice {
+            pose: Pose::from_translation(center),
             vertices,
             tris,
             pent,
+            compound,
             material: self.material
         }
     }
@@ -267,8 +328,10 @@ impl CastObject for PentSlice {
     fn hit(&self, ray: &Ray) -> Option<Hit> {
         let mut min_hit: Option<Hit> = None;
 
+        let scale = Vec3::new(0.8, 0.8, 0.8);
         self.tris.iter().for_each(|o| {
-            if let Some(hit) = o.cast_local_ray_and_get_normal(
+            if let Some(hit) = o.scaled(scale).cast_ray_and_get_normal(
+                &self.pose,
                 ray,
                 9999.0f32,
                 true
@@ -283,7 +346,8 @@ impl CastObject for PentSlice {
             }
         });
 
-        if let Some(hit) = self.pent.cast_local_ray_and_get_normal(
+        if let Some(hit) = self.pent.clone().scaled(scale).unwrap().cast_ray_and_get_normal(
+            &self.pose,
             ray,
             9999.0f32,
             true
@@ -325,77 +389,6 @@ impl CastObject for PentSlice {
 
     fn material(&self) -> &Material {
         &self.material
-    }
-}
-
-struct Docecahedron {
-    tris: Vec<Sphere>
-}
-
-impl Docecahedron {
-    fn new() -> Self {
-        let phi = (1.0f32 + f32::sqrt(5.0f32)) / 2.0f32;
-        let vertices = vec![
-            // Orange vertices
-            Vec3::new(-1.0, -1.0, -1.0),
-            Vec3::new(-1.0, -1.0, 1.0),
-            Vec3::new(-1.0, 1.0, -1.0),
-            Vec3::new(-1.0, 1.0, 1.0),
-            Vec3::new(1.0, -1.0, -1.0),
-            Vec3::new(1.0, -1.0, 1.0),
-            Vec3::new(1.0, 1.0, -1.0),
-            Vec3::new(1.0, 1.0, 1.0),
-            // Green vertices
-            Vec3::new(0.0, -phi, -1.0 / phi),
-            Vec3::new(0.0, -phi, 1.0 / phi),
-            Vec3::new(0.0, phi, -1.0 / phi),
-            Vec3::new(0.0, phi, 1.0 / phi),
-            // Blue vertices
-            Vec3::new(-1.0 / phi, 0.0, -phi),
-            Vec3::new(1.0 / phi, 0.0, -phi),
-            Vec3::new(-1.0 / phi, 0.0, phi),
-            Vec3::new(1.0 / phi, 0.0, phi),
-            // Red vertices
-            Vec3::new(-phi, -1.0 / phi, 0.0),
-            Vec3::new(-phi, 1.0 / phi, 0.0),
-            Vec3::new(phi, -1.0 / phi, 0.0),
-            Vec3::new(phi, 1.0 / phi, 0.0),
-        ];
-
-        let scale = 0.3f32;
-        let mut tris = vertices.iter().map(|v| {
-            Sphere {
-                radius: 1.0 / phi * scale,
-                pos: *v * scale,
-                material: Material {
-                    color: Vec3::new(1.0, 1.0, 0.0),
-                    reflective: false,
-                },
-            }
-        }).collect();
-        Self {
-            tris
-        }
-    }
-}
-
-impl CastObject for Docecahedron {
-    fn hit(&self, ray: &Ray) -> Option<Hit> {
-        let mut min_hit: Option<Hit> = None;
-
-        self.tris.iter().for_each(|o| {
-            if let Some(hit) = o.hit(&ray) {
-                if min_hit.is_none() || hit.distance < min_hit.as_ref().unwrap().distance {
-                    min_hit = Some(hit);
-                }
-            }
-        });
-
-        min_hit
-    }
-
-    fn material(&self) -> &Material {
-        self.material()
     }
 }
 
@@ -495,7 +488,9 @@ fn write_image(sink: Sink, path: &Path) {
 }
 
 fn main() {
-    let size = 512;
+    let mut graph = Graph::<PentSlice, ()>::new();
+
+    let size = 1024;
     let mut sink = Sink::new(size, size);
 
     let mut world = World::new();
@@ -507,38 +502,40 @@ fn main() {
         }
     );
     world.objects.push(Box::new(slice.clone()));
+    let mut last_index = graph.add_node(slice.clone());
 
-    slice = slice.flip(PentFace::Tri(3));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
+    let scale = Vec3::new(0.9, 0.9, 0.9);
+    for i in 0..62 {
 
-    slice = slice.flip(PentFace::Tri(1));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
+        let dir = if i % 8 == 0 {
+            PentFace::Pent
+            // PentFace::Tri(0)
+        } else {
+            PentFace::Tri((i + 1) % 5)
+        };
 
-    slice = slice.flip(PentFace::Tri(3));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
+        slice = slice.flip(dir);
+        // slice.material.color = Vec3::new(random(), random(), random());
+        slice.material.color = Vec3::new(1.0, 0.0, 0.0);
 
-    slice = slice.flip(PentFace::Tri(4));
-    slice.material.color = Vec3::new(random(), random(), random());
-    world.objects.push(Box::new(slice.clone()));
-    //
-    // slice = slice.flip(PentFace::Tri(1));
-    // slice.material.color = Vec3::new(random(), random(), random());
-    // world.objects.push(Box::new(slice.clone()));
-    //
-    // slice = slice.flip(PentFace::Tri(3));
-    // slice.material.color = Vec3::new(random(), random(), random());
-    // world.objects.push(Box::new(slice.clone()));
-    //
-    // slice = slice.flip(PentFace::Tri(4));
-    // slice.material.color = Vec3::new(random(), random(), random());
-    // world.objects.push(Box::new(slice.clone()));
-    //
-    // slice = slice.flip(PentFace::Tri(2));
-    // slice.material.color = Vec3::new(random(), random(), random());
-    // world.objects.push(Box::new(slice.clone()));
+        // Check if there's any intersection
+        let collides = graph.raw_nodes().iter().any(|n| {
+            let collision_slice = &n.weight.compound.clone().scale_dyn(scale, 1).unwrap();
+            if intersection_test(&slice.pose, &slice.compound, &n.weight.pose, collision_slice.as_ref()).unwrap() {
+                return true;
+            }
+            false
+        });
+
+        if collides {
+            continue
+        }
+
+        // Add the pent for raycasting
+        world.objects.push(Box::new(slice.clone()));
+    }
+
+    println!("Finished computing mesh");
 
     // world.objects.push(Box::new(Docecahedron::new()));
     // for i in 0..15 {
@@ -562,7 +559,7 @@ fn main() {
     //     Vec3::new(0.5, -0.1, -0.4),
     // )));
 
-    let light_dir = Vec3::new(4.0, -1.4, 0.5).normalize();
+    let light_dir = Vec3::new(4.0, -0.4, 1.8).normalize();
 
     sink.get_mut_vec()
         .into_par_iter()
@@ -573,7 +570,7 @@ fn main() {
             let spread = 2.5;
             let ray_dir = Vec3::new(rx * 2.0 - 1.0, -ry * 2.0 + 1.0, spread).normalize();
             let mut ray = Ray {
-                origin: Vec3::new(0.0, 0.0, -2.0),
+                origin: Vec3::new(0.0, 2.33, -7.4),
                 dir: ray_dir
             };
 
@@ -610,7 +607,8 @@ fn main() {
                 light = f32::max(0.4f32, light);
 
                 if shadowed {
-                    light = f32::min(0.2, light);
+                    // light = f32::min(0.2, light);
+                    light *= 0.5;
                 }
 
                 color *= light;
