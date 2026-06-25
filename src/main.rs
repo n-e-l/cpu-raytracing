@@ -1,5 +1,7 @@
+use std::fmt::Write;
 use indicatif::ParallelProgressIterator;
 use std::cmp::min;
+use std::fs;
 use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::BufWriter;
@@ -15,6 +17,7 @@ use parry3d::shape;
 use parry3d::shape::{CompositeShape, Compound, ConvexPolyhedron, FeatureId, Shape, SharedShape, TriMesh, Triangle};
 use petgraph::data::Build;
 use petgraph::Graph;
+use petgraph::graph::{GraphIndex, NodeIndex};
 use rand::{random, random_bool, random_range};
 use rayon::iter::IntoParallelIterator;
 use crate::PentFace::{Pent, Tri};
@@ -80,6 +83,7 @@ struct PentSlice {
     tris: Vec<Triangle>,
 }
 
+#[derive(Clone, Copy)]
 enum PentFace {
     Tri(usize),
     Pent
@@ -374,45 +378,10 @@ impl CastObject for PentSlice {
     }
 }
 
-struct World {
-    objects: Vec<Box<dyn CastObject>>,
-}
-
 struct Hit<'a> {
     distance: f32,
     object: &'a dyn CastObject,
     normal: Vec3
-}
-
-impl World {
-    fn new() -> Self {
-        Self {
-            objects: vec![
-            //     Box::new(Floor {
-            //     y: -0.2,
-            //     material: Material {
-            //         color: Vec3::new(0.5, 0.5, 0.5),
-            //         reflective: false
-            //     }
-            // })
-            ],
-        }
-    }
-
-    fn hit(&self, ray: Ray) -> Option<Hit> {
-
-        let mut min_hit: Option<Hit> = None;
-
-        self.objects.iter().for_each(|o| {
-            if let Some(hit) = o.hit(&ray) {
-                if min_hit.is_none() || hit.distance < min_hit.as_ref().unwrap().distance {
-                    min_hit = Some(hit);
-                }
-            }
-        });
-
-        min_hit
-    }
 }
 
 struct Sink {
@@ -488,67 +457,151 @@ fn build_uber(slices: &[PentSlice]) -> (TriMesh, Vec<Material>) {
     (TriMesh::new(verts, indices).unwrap(), materials)
 }
 
+fn bake_uber_vcolor(mesh: &TriMesh, materials: &[Material]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>) {
+    let src_verts = mesh.vertices();
+    let src_indices = mesh.indices();
+    assert_eq!(src_indices.len(), materials.len(), "one material per triangle");
+
+    let mut verts = Vec::with_capacity(src_indices.len() * 3);
+    let mut cols = Vec::with_capacity(src_indices.len() * 3);
+    let mut idx = Vec::with_capacity(src_indices.len());
+
+    for (tri, mat) in src_indices.iter().zip(materials) {
+        let base = verts.len() as u32;
+        let c = mat.color;           // the baked color
+        for &vi in tri {
+            let p = src_verts[vi as usize];
+            verts.push([p.x, p.y, p.z]);
+            cols.push(c.into());
+        }
+        idx.push([base, base + 1, base + 2]);
+    }
+    (verts, cols, idx)
+}
+
+fn write_obj_vcolor(
+    path: impl AsRef<Path>,
+    vertices: &[[f32; 3]],
+    colors: &[[f32; 3]],     // one per vertex, same length as vertices
+    indices: &[[u32; 3]],
+) -> std::io::Result<()> {
+    let mut s = String::new();
+    for (v, c) in vertices.iter().zip(colors) {
+        writeln!(s, "v {} {} {} {} {} {}", v[0], v[1], v[2], c[0], c[1], c[2]).unwrap();
+    }
+    for f in indices {
+        writeln!(s, "f {} {} {}", f[0] + 1, f[1] + 1, f[2] + 1).unwrap();
+    }
+    fs::write(path, s)
+}
+
+fn trimesh_to_obj(path: impl AsRef<Path>, mesh: &TriMesh, materials: &Vec<Material>) -> std::io::Result<()> {
+    let verts: Vec<[f32; 3]> = mesh.vertices().iter().map(|p| [p.x, p.y, p.z]).collect();
+    let idx: Vec<[u32; 3]> = mesh.indices().iter().map(|i| [i[0], i[1], i[2]]).collect();
+    let (verts, cols, idx) = bake_uber_vcolor(mesh, &materials);
+    write_obj_vcolor(path, &verts, &cols, &idx)
+}
+
+struct World {
+    graph: Graph::<(Option<PentSlice>), PentFace>,
+    slices: Vec<PentSlice>,
+    root: NodeIndex
+}
+
+impl World {
+    fn new() -> Self {
+        let mut graph = Graph::<(Option<PentSlice>), PentFace>::new();
+
+        let mut slice = PentSlice::new(
+            Material {
+                color: Vec3::new(0.0, 1.0, 1.0),
+                reflective: false
+            }
+        );
+        let root = graph.add_node(Some(slice.clone()));
+
+        Self {
+            graph,
+            slices: vec![slice],
+            root
+        }
+    }
+
+    /// Tries to add a slice. Returns none if there was no physical space to add it
+    fn add_slice(&mut self, index: NodeIndex, face: PentFace, slice: PentSlice) -> Option<NodeIndex> {
+
+        // Check if there's any intersection
+        // let collides = self.graph.raw_nodes().iter().any(|n| {
+        //     let pent = &n.weight;
+        //     if let Some(pent) = pent {
+        //         if intersection_test(&slice.pose, &slice.mesh, &pent.pose, &pent.scaled_mesh).unwrap() {
+        //             return true;
+        //         }
+        //     }
+        //     false
+        // });
+        //
+        // if collides {
+        //     return None
+        // }
+
+        self.slices.push(slice.clone());
+        let index = self.graph.add_node(Some(slice));
+
+        Some(index)
+    }
+
+    fn get_slice(&self, i: usize) -> &PentSlice {
+        &self.slices[i]
+    }
+}
+
 fn main() {
-    let mut graph = Graph::<PentSlice, ()>::new();
 
     let size = 1024;
     let mut sink = Sink::new(size, size);
 
     let mut world = World::new();
 
-    let mut slice = PentSlice::new(
-        Material {
-            color: Vec3::new(0.0, 1.0, 1.0),
-            reflective: false
-        }
-    );
-    world.objects.push(Box::new(slice.clone()));
-    let mut slices = vec![slice.clone()];
+    let mut index = world.root;
+    let mut slice = world.slices.get(0).unwrap().clone();
 
-    let count = 492;
+    let count = 34492;
     for i in 0..count {
 
-        let dir = if i > 10 && i % 81 == 0 {
-            slice = slices[slices.len() - 10].clone();
-            PentFace::Pent
+        let mut color = Vec3::new(1.0, 0.0, 0.0);
+        let dir = if i % 90 == 0 {
+            color = Vec3::new(1.0, 0.0, 0.0);
+            PentFace::Tri(2)
         } else if i % 7 == 0 {
+            color = Vec3::new(0.0, 0.0, 1.0);
             PentFace::Pent
         } else {
-            PentFace::Tri((i + 2) % 5)
+            let t = i as f32 / count as f32;
+            color = Vec3::new(1.0, 0.0, 0.0) * t + Vec3::new(1.0, 1.0, 1.0) * (1.0 - t);
+            PentFace::Tri(i % 5)
         };
 
-        slice = slice.flip(dir);
+        slice = slice.flip(dir).clone();
         // slice.material.color = Vec3::new(random(), random(), random());
-        let t = i as f32 / count as f32;
-        slice.material.color = Vec3::new(1.0, 0.0, 0.0) * t + Vec3::new(1.0, 1.0, 1.0) * (1.0 - t);
+        slice.material.color = color;
 
-        // Check if there's any intersection
-        let collides = graph.raw_nodes().iter().any(|n| {
-            if intersection_test(&slice.pose, &slice.mesh, &n.weight.pose, &n.weight.mesh).unwrap() {
-                return true;
-            }
-            false
-        });
-
-        if collides {
-            continue
-        }
-
-        // Add the pent for raycasting
-        world.objects.push(Box::new(slice.clone()));
-        slices.push(slice.clone());
+        world.add_slice(index, dir, slice.clone());
     }
 
     println!("Finished computing mesh");
 
     // Generate world mesh to optimize ray traversal
-    let (uber, materials) = build_uber(&slices);
+    let (uber, materials) = build_uber(&world.slices);
+
+    // Export
+    trimesh_to_obj("mesh.obj", &uber, &materials);
 
     let light_dir = Vec3::new(2.0, -0.4, 2.8).normalize();
     let total = size * size; // or sink.get_mut_vec().len()
 
-    let target = Vec3::new(-1.0, 0.0, -10.0);           // center of the scene
-    let radius = 32.5;
+    let target = Vec3::new(-1.0, 0.4, -3.8);           // center of the scene
+    let radius = 12.5;
     let height = 1.93;
     let angle: f32 = -1.7;              // azimuth in radians — this is what you sweep
 
@@ -589,10 +642,12 @@ fn main() {
                 let mut light = hit.normal.dot(-light_dir);
                 let point = ray.point_at(hit.time_of_impact);
 
-                let shadowed = world.hit(Ray {
+                // Cast shadow
+                let shadow_ray = Ray {
                     origin: point - light_dir * 0.001,
                     dir: -light_dir
-                }).is_some();
+                };
+                let shadowed = uber.cast_ray(&Pose::identity(), &shadow_ray, 9999.0, true).is_some();
 
                 light = f32::max(0.4f32, light);
 
